@@ -1,0 +1,551 @@
+"""
+ULTIMATE OVERKILL CALCULATOR v4.2.0
+====================================
+A calculator so over-engineered it needs its own onboarding process.
+
+Features you didn't ask for:
+- Abstract factory pattern for operations
+- Observer pattern for logging
+- Strategy pattern for computation
+- Decorator pattern for validation
+- Singleton pattern for the engine
+- Command pattern for history
+- Chain of responsibility for input parsing
+- 47 classes for a + b
+"""
+
+from __future__ import annotations
+import abc
+import logging
+import sys
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Callable, Dict, List, Optional, Any
+from functools import wraps
+
+
+# ============================================================
+# 1. LOGGING INFRASTRUCTURE
+# ============================================================
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+logger = logging.getLogger("OverkillCalculator")
+
+
+# ============================================================
+# 2. ENUMS & CONSTANTS
+# ============================================================
+
+class OperationType(Enum):
+    ADD = "addition"
+    SUBTRACT = "subtraction"
+    MULTIPLY = "multiplication"
+    DIVIDE = "division"
+    POWER = "exponentiation"
+    MODULO = "modulo"
+
+
+class CalculationStatus(Enum):
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    SUCCESS = "success"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class PrecisionLevel(Enum):
+    LOW = 2
+    MEDIUM = 6
+    HIGH = 12
+    ASTRONOMICAL = 64
+
+
+# ============================================================
+# 3. EXCEPTIONS
+# ============================================================
+
+class CalculatorException(Exception):
+    """Base exception for all calculator-related errors."""
+    pass
+
+
+class DivisionByZeroError(CalculatorException):
+    pass
+
+
+class InvalidInputError(CalculatorException):
+    pass
+
+
+class OperationNotFoundError(CalculatorException):
+    pass
+
+
+class OverflowError(CalculatorException):
+    pass
+
+
+# ============================================================
+# 4. VALUE OBJECTS
+# ============================================================
+
+@dataclass(frozen=True)
+class Number:
+    """An immutable number wrapper."""
+    value: float
+    label: str = "number"
+
+    def __post_init__(self):
+        if not isinstance(self.value, (int, float)):
+            raise InvalidInputError(f"'{self.value}' is not a valid number")
+
+    def __repr__(self) -> str:
+        return f"Number({self.value!r}, label={self.label!r})"
+
+
+@dataclass
+class CalculationRequest:
+    """A request to perform a calculation."""
+    left: Number
+    right: Number
+    operation: OperationType
+    precision: PrecisionLevel = PrecisionLevel.MEDIUM
+
+
+@dataclass
+class CalculationResult:
+    """The result of a calculation."""
+    value: float
+    request: CalculationRequest
+    status: CalculationStatus = CalculationStatus.SUCCESS
+    error: Optional[str] = None
+
+    def formatted(self) -> str:
+        precision = self.request.precision.value
+        return f"{round(self.value, precision)}"
+
+
+# ============================================================
+# 5. OBSERVER PATTERN
+# ============================================================
+
+class CalculationObserver(abc.ABC):
+    @abc.AbstractMethod
+    def on_calculation_started(self, request: CalculationRequest) -> None: ...
+    @abc.abstractmethod
+    def on_calculation_completed(self, result: CalculationResult) -> None: ...
+    @abc.abstractmethod
+    def on_calculation_failed(self, request: CalculationRequest, error: Exception) -> None: ...
+
+
+class LoggingObserver(CalculationObserver):
+    def on_calculation_started(self, request: CalculationRequest) -> None:
+        logger.info(f"Calculating: {request.left.value} {request.operation.value} {request.right.value}")
+
+    def on_calculation_completed(self, result: CalculationResult) -> None:
+        logger.info(f"Result: {result.formatted()}")
+
+    def on_calculation_failed(self, request: CalculationRequest, error: Exception) -> None:
+        logger.error(f"Calculation failed: {error}")
+
+
+class HistoryObserver(CalculationObserver):
+    def __init__(self):
+        self.history: List[CalculationResult] = []
+
+    def on_calculation_started(self, request): pass
+
+    def on_calculation_completed(self, result):
+        self.history.append(result)
+
+    def on_calculation_failed(self, request, error):
+        self.history.append(
+            CalculationResult(value=float("nan"), request=request,
+                              status=CalculationStatus.FAILED, error=str(error))
+        )
+
+
+class MetricsObserver(CalculationObserver):
+    def __init__(self):
+        self.total = 0
+        self.failures = 0
+
+    def on_calculation_started(self, request): pass
+
+    def on_calculation_completed(self, result):
+        self.total += 1
+
+    def on_calculation_failed(self, request, error):
+        self.total += 1
+        self.failures += 1
+
+
+# ============================================================
+# 6. STRATEGY PATTERN - OPERATIONS
+# ============================================================
+
+class OperationStrategy(abc.ABC):
+    operation_type: OperationType
+
+    @abc.abstractmethod
+    def execute(self, a: float, b: float) -> float: ...
+
+
+class AddStrategy(OperationStrategy):
+    operation_type = OperationType.ADD
+    def execute(self, a, b):
+        logger.debug(f"Adding {a} + {b}")
+        return a + b
+
+
+class SubtractStrategy(OperationStrategy):
+    operation_type = OperationType.SUBTRACT
+    def execute(self, a, b):
+        return a - b
+
+
+class MultiplyStrategy(OperationStrategy):
+    operation_type = OperationType.MULTIPLY
+    def execute(self, a, b):
+        return a * b
+
+
+class DivideStrategy(OperationStrategy):
+    operation_type = OperationType.DIVIDE
+    def execute(self, a, b):
+        if b == 0:
+            raise DivisionByZeroError(f"Cannot divide {a} by zero")
+        return a / b
+
+
+class PowerStrategy(OperationStrategy):
+    operation_type = OperationType.POWER
+    def execute(self, a, b):
+        result = a ** b
+        if abs(result) > 1e308:
+            raise OverflowError("Result too large")
+        return result
+
+
+class ModuloStrategy(OperationStrategy):
+    operation_type = OperationType.MODULO
+    def execute(self, a, b):
+        if b == 0:
+            raise DivisionByZeroError("Cannot modulo by zero")
+        return a % b
+
+
+# ============================================================
+# 7. FACTORY PATTERN
+# ============================================================
+
+class OperationFactory:
+    """Abstract factory for creating operation strategies."""
+
+    _registry: Dict[OperationType, type] = {
+        OperationType.ADD: AddStrategy,
+        OperationType.SUBTRACT: SubtractStrategy,
+        OperationType.MULTIPLY: MultiplyStrategy,
+        OperationType.DIVIDE: DivideStrategy,
+        OperationType.POWER: PowerStrategy,
+        OperationType.MODULO: ModuloStrategy,
+    }
+
+    @classmethod
+    def register(cls, op_type: OperationType, strategy_cls: type) -> None:
+        cls._registry[op_type] = strategy_cls
+        logger.info(f"Registered strategy for {op_type}")
+
+    @classmethod
+    def create(cls, op_type: OperationType) -> OperationStrategy:
+        strategy_cls = cls._registry.get(op_type)
+        if strategy_cls is None:
+            raise OperationNotFoundError(f"No strategy for {op_type}")
+        return strategy_cls()
+
+
+# ============================================================
+# 8. DECORATORS
+# ============================================================
+
+def validate_positive(func: Callable) -> Callable:
+    @wraps(func)
+    def wrapper(self, a, b):
+        if a < 0 or b < 0:
+            logger.warning("Negative numbers supplied - continuing anyway")
+        return func(self, a, b)
+    return wrapper
+
+
+def retry(max_attempts: int = 3):
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exc = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return func(*args, **kwargs)
+                except (DivisionByZeroError, InvalidInputError):
+                    raise
+                except Exception as e:
+                    last_exc = e
+                    logger.warning(f"Attempt {attempt} failed: {e}")
+            raise last_exc
+        return wrapper
+    return decorator
+
+
+# ============================================================
+# 9. COMMAND PATTERN
+# ============================================================
+
+class Command(abc.ABC):
+    @abc.abstractmethod
+    def execute(self) -> CalculationResult: ...
+    @abc.abstractmethod
+    def undo(self) -> None: ...
+
+
+class CalculateCommand(Command):
+    def __init__(self, engine: "CalculatorEngine", request: CalculationRequest):
+        self.engine = engine
+        self.request = request
+        self.result: Optional[CalculationResult] = None
+
+    def execute(self) -> CalculationResult:
+        self.result = self.engine.perform(self.request)
+        return self.result
+
+    def undo(self) -> None:
+        self.result = None
+
+
+class CommandInvoker:
+    def __init__(self):
+        self._history: List[Command] = []
+        self._redo: List[Command] = []
+
+    def run(self, command: Command) -> CalculationResult:
+        result = command.execute()
+        self._history.append(command)
+        self._redo.clear()
+        return result
+
+    def undo(self) -> None:
+        if not self._history:
+            logger.info("Nothing to undo")
+            return
+        cmd = self._history.pop()
+        cmd.undo()
+        self._redo.append(cmd)
+        logger.info("Undo performed")
+
+    def redo(self) -> None:
+        if not self._redo:
+            logger.info("Nothing to redo")
+            return
+        cmd = self._redo.pop()
+        cmd.execute()
+        self._history.append(cmd)
+        logger.info("Redo performed")
+
+
+# ============================================================
+# 10. CHAIN OF RESPONSIBILITY - INPUT PARSING
+# ============================================================
+
+class InputParser(abc.ABC):
+    def __init__(self):
+        self._next: Optional[InputParser] = None
+
+    def set_next(self, parser: "InputParser") -> "InputParser":
+        self._next = parser
+        return parser
+
+    def parse(self, raw: Any) -> Number:
+        if self._can_handle(raw):
+            return self._handle(raw)
+        if self._next:
+            return self._next.parse(raw)
+        raise InvalidInputError(f"Cannot parse: {raw!r}")
+
+    @abc.abstractmethod
+    def _can_handle(self, raw: Any) -> bool: ...
+    @abc.abstractmethod
+    def _handle(self, raw: Any) -> Number: ...
+
+
+class IntParser(InputParser):
+    def _can_handle(self, raw):
+        return isinstance(raw, int) and not isinstance(raw, bool)
+    def _handle(self, raw):
+        return Number(float(raw), "int")
+
+
+class FloatParser(InputParser):
+    def _can_handle(self, raw):
+        return isinstance(raw, float)
+    def _handle(self, raw):
+        return Number(raw, "float")
+
+
+class StringParser(InputParser):
+    def _can_handle(self, raw):
+        return isinstance(raw, str)
+    def _handle(self, raw):
+        try:
+            return Number(float(raw.strip()), "string-parsed")
+        except ValueError:
+            raise InvalidInputError(f"Cannot convert '{raw}' to number")
+
+
+def build_default_parser() -> InputParser:
+    int_parser = IntParser()
+    float_parser = FloatParser()
+    string_parser = StringParser()
+    int_parser.set_next(float_parser).set_next(string_parser)
+    return int_parser
+
+
+# ============================================================
+# 11. SINGLETON ENGINE
+# ============================================================
+
+class CalculatorEngine:
+    """The one true calculator engine (singleton)."""
+    _instance: Optional["CalculatorEngine"] = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self._observers: List[CalculationObserver] = []
+        self._factory = OperationFactory()
+        logger.info("CalculatorEngine initialized")
+
+    def subscribe(self, observer: CalculationObserver) -> None:
+        self._observers.append(observer)
+
+    def _notify_started(self, req):
+        for obs in self._observers:
+            obs.on_calculation_started(req)
+
+    def _notify_completed(self, res):
+        for obs in self._observers:
+            obs.on_calculation_completed(res)
+
+    def _notify_failed(self, req, err):
+        for obs in self._observers:
+            obs.on_calculation_failed(req, err)
+
+    @retry(max_attempts=2)
+    def perform(self, request: CalculationRequest) -> CalculationResult:
+        self._notify_started(request)
+        try:
+            strategy = self._factory.create(request.operation)
+            raw = strategy.execute(request.left.value, request.right.value)
+            result = CalculationResult(value=raw, request=request)
+            self._notify_completed(result)
+            return result
+        except CalculatorException as e:
+            self._notify_failed(request, e)
+            raise
+        except Exception as e:
+            self._notify_failed(request, e)
+            raise CalculatorException(str(e))
+
+
+# ============================================================
+# 12. FACADE
+# ============================================================
+
+class OverkillCalculator:
+    """The friendly facade hiding 47 classes."""
+
+    def __init__(self):
+        self.engine = CalculatorEngine()
+        self.history = HistoryObserver()
+        self.metrics = MetricsObserver()
+        self.engine.subscribe(LoggingObserver())
+        self.engine.subscribe(self.history)
+        self.engine.subscribe(self.metrics)
+        self.parser = build_default_parser()
+        self.invoker = CommandInvoker()
+
+    def calculate(self, a: Any, b: Any,
+                  op: OperationType = OperationType.ADD,
+                  precision: PrecisionLevel = PrecisionLevel.HIGH) -> CalculationResult:
+        left = self.parser.parse(a)
+        right = self.parser.parse(b)
+        request = CalculationRequest(left, right, op, precision)
+        command = CalculateCommand(self.engine, request)
+        return self.invoker.run(command)
+
+    def add(self, a, b): return self.calculate(a, b, OperationType.ADD)
+    def sub(self, a, b): return self.calculate(a, b, OperationType.SUBTRACT)
+    def mul(self, a, b): return self.calculate(a, b, OperationType.MULTIPLY)
+    def div(self, a, b): return self.calculate(a, b, OperationType.DIVIDE)
+    def pow(self, a, b): return self.calculate(a, b, OperationType.POWER)
+    def mod(self, a, b): return self.calculate(a, b, OperationType.MODULO)
+
+    def undo(self): self.invoker.undo()
+    def redo(self): self.invoker.redo()
+
+    def print_history(self):
+        print("\n=== Calculation History ===")
+        for i, r in enumerate(self.history.history, 1):
+            req = r.request
+            status = "✓" if r.status == CalculationStatus.SUCCESS else "✗"
+            print(f"{i}. {status} {req.left.value} {req.operation.value} "
+                  f"{req.right.value} = {r.formatted() if r.status == CalculationStatus.SUCCESS else r.error}")
+        print(f"Metrics: {self.metrics.total} total, {self.metrics.failures} failures")
+
+
+# ============================================================
+# 13. DEMO
+# ============================================================
+
+def demo():
+    print("\n" + "=" * 60)
+    print("ULTIMATE OVERKILL CALCULATOR v4.2.0")
+    print("Because why use + when you can use 47 classes?")
+    print("=" * 60 + "\n")
+
+    calc = OverkillCalculator()
+
+    print("--- Basic Operations ---")
+    print(calc.add(2, 3))
+    print(calc.sub(10, 4))
+    print(calc.mul(6, 7))
+    print(calc.div(100, 5))
+    print(calc.pow(2, 10))
+    print(calc.mod(17, 5))
+
+    print("\n--- String Input Parsing (Chain of Responsibility) ---")
+    print(calc.add("3.14", "2.86"))
+
+    print("\n--- Error Handling ---")
+    try:
+        calc.div(1, 0)
+    except DivisionByZeroError as e:
+        print(f"Caught as expected: {e}")
+
+    print("\n--- Undo / Redo ---")
+    calc.undo()
+    calc.redo()
+
+    calc.print_history()
+
+
+if __name__ == "__main__":
+    demo()
